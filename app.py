@@ -1,22 +1,39 @@
 import os
+import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-import google.generativeai as genai
 
 app = Flask(__name__)
 
-# מסד נתונים זמני
-MOCK_PRICES = {
-    "חלב": {"סופר זול": 6.20, "מגה סופר": 6.80},
-    "קפה": {"סופר זול": 16.90, "מגה סופר": 21.00},
-    "חיתולים": {"סופר זול": 32.00, "מגה סופר": 38.00},
-    "אורז": {"סופר זול": 8.50, "מגה סופר": 9.90},
-    "שמן זית": {"סופר זול": 29.90, "מגה סופר": 34.90}
-}
+def get_nearby_supermarkets(lat, lng):
+    """פונקציה שפונה לגוגל מפות ומוצאת סופרים קרובים ברדיוס של כ-10 קילומטר (כ-20 דקות נסיעה)"""
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if not api_key:
+        return ["❌ חסר מפתח הגדרה של Google Maps בשרת"]
+        
+    # רדיוס של 10,000 מטרים (10 ק"מ) תואם לטווח נסיעה של כ-20 דקות עירוני/פרברי
+    url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=10000&type=supermarket&language=he&key={api_key}"
+    
+    try:
+        response = requests.get(url).json()
+        results = response.get("results", [])
+        
+        stores = []
+        # לוקחים את 3 הסופרים הראשונים שהכי קרובים/פופולריים
+        for place in results[:3]:
+            name = place.get("name")
+            vicinity = place.get("vicinity", "כתובת לא ידועה")
+            stores.append(f"🏪 *{name}* - {vicinity}")
+            
+        if not stores:
+            return ["לא מצאתי סופרמרקטים ברדיוס הקרוב אליך."]
+        return stores
+    except Exception as e:
+        print(f"Error calling Google Places API: {e}")
+        return ["שגיאה בסריקת החנויות סביבך."]
 
 @app.route("/bot", methods=["POST"])
 def whatsapp_bot():
-    # בדיקה האם המשתמש שלח מיקום (וואטסאפ שולח קווי רוחב ואורך)
     latitude = request.values.get('Latitude')
     longitude = request.values.get('Longitude')
     
@@ -24,30 +41,22 @@ def whatsapp_bot():
     msg = resp.message()
     
     if latitude and longitude:
-        # המשתמש שלח מיקום!
         print(f"📍 Received location: Lat {latitude}, Lng {longitude}")
-        reply = f"📍 המיקום שלך התקבל בהצלחה!\nקו רוחב: {latitude}\nקו אורך: {longitude}\n\nבשלב הבא אני אסרוק את הסופרים ברדיוס של 20 דקות מהנקודה הזו!"
+        
+        # שליפת חנויות אמיתיות מגוגל מפות על בסיס המיקום של המשתמש
+        nearby_stores = get_nearby_supermarkets(latitude, longitude)
+        
+        reply = "📍 המיקום שלך נקלט! הנה הסופרמרקטים הכי קרובים אליך בטווח נסיעה:\n\n"
+        for store in nearby_stores:
+            reply += f"{store}\n"
+            
+        reply += "\n🛒 שלח לי עכשיו את רשימת המוצרים שלך (למשל: 'חלב ואורז') כדי שנבדוק איפה הכי זול לקנות אותם מביניהם!"
         msg.body(reply)
         return str(resp)
 
-    # אם זה טקסט רגיל ולא מיקום, נריץ את הלוגיקה הרגילה של הבוט
+    # לוגיקת הודעת טקסט רגילה (אם המשתמש שלח מוצרים)
     user_msg = request.values.get('Body', '').strip()
-    print(f"📱 New WhatsApp message: {user_msg}")
-    
-    reply = "🤖 סוכן ה-AI מצא את המחירים הבאים:\n\n"
-    found_any = False
-    
-    for item in MOCK_PRICES.keys():
-        if item in user_msg:
-            found_any = True
-            reply += f"🛒 מצרך: *{item}*\n"
-            for store, price in MOCK_PRICES[item].items():
-                reply += f"- ב-{store} זה עולה ₪{price}\n"
-            reply += "\n"
-            
-    if not found_any:
-        reply = f"היי! כדי שאדע אילו סופרים קרובים אליך ברדיוס של 20 דקות, אנא שלח לי את המיקום הנוכחי שלך בוואטסאפ (באמצעות כפתור ה'+' -> מיקום)."
-
+    reply = f"קיבלתי את הרשימה: '{user_msg}'. כדי שאדע להגיד לך איזה סופר מהסופרים באזור שלך הכי זול, שלח לי קודם את המיקום שלך בלחיצה על ה-'+' בוואטסאפ."
     msg.body(reply)
     return str(resp)
 
