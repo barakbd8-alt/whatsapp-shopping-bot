@@ -5,32 +5,60 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-def get_nearby_supermarkets(lat, lng):
-    """פונקציה שפונה לגוגל מפות ומוצאת סופרים קרובים ברדיוס של כ-10 קילומטר (כ-20 דקות נסיעה)"""
+# מאגר מחירים זמני (בהמשך נחליף למאגר ארצי)
+MOCK_PRICES = {
+    "חלב": {"שופרסל שלי": 6.20, "רמי לוי": 5.90, "יוחננוף": 5.90, "ויקטורי": 6.10},
+    "קפה": {"שופרסל שלי": 19.90, "רמי לוי": 16.90, "יוחננוף": 17.50, "ויקטורי": 18.00},
+    "אורז": {"שופרסל שלי": 9.90, "רמי לוי": 7.90, "יוחננוף": 8.20, "ויקטורי": 8.50}
+}
+
+def get_nearby_stores(lat, lng):
+    """מוצא סופרמרקטים ברדיוס נסיעה של עד 20 דקות באמצעות Google Maps"""
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
     if not api_key:
-        return ["❌ חסר מפתח הגדרה של Google Maps בשרת"]
+        return []
         
-    # רדיוס של 10,000 מטרים (10 ק"מ) תואם לטווח נסיעה של כ-20 דקות עירוני/פרברי
-    url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=10000&type=supermarket&language=he&key={api_key}"
-    
+    # 1. חיפוש סופרמרקטים קרובים פיזית
+    places_url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lng}&radius=5000&type=supermarket&key={api_key}"
     try:
-        response = requests.get(url).json()
-        results = response.get("results", [])
+        places_res = requests.get(places_url).json()
+        results = places_res.get('results', [])[:5] # ניקח את 5 הסופרים הכי קרובים
         
-        stores = []
-        # לוקחים את 3 הסופרים הראשונים שהכי קרובים/פופולריים
-        for place in results[:3]:
-            name = place.get("name")
-            vicinity = place.get("vicinity", "כתובת לא ידועה")
-            stores.append(f"🏪 *{name}* - {vicinity}")
+        if not results:
+            return []
             
-        if not stores:
-            return ["לא מצאתי סופרמרקטים ברדיוס הקרוב אליך."]
-        return stores
+        # 2. חישוב זמן נסיעה באוטו לכל סופרמרקט
+        destinations = "|".join([f"{r['geometry']['location']['lat']},{r['geometry']['location']['lng']}" for r in results])
+        dist_url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={lat},{lng}&destinations={destinations}&mode=driving&key={api_key}"
+        dist_res = requests.get(dist_url).json()
+        
+        valid_stores = []
+        rows = dist_res.get('rows', [{}])[0].get('elements', [])
+        
+        for i, element in enumerate(rows):
+            if element.get('status') == 'OK':
+                duration_mins = element['duration']['value'] / 60 # המרה לשקות
+                # פילטר: רק חנויות בטווח של 20 דקות נסיעה באוטו
+                if duration_mins <= 20:
+                    store_name = results[i]['name']
+                    # ננסה "לנרמל" את השם לרשתות מוכרות
+                    matched_chain = "רמי לוי"
+                    if "shufersal" in store_name.lower() or "שופרסל" in store_name:
+                        matched_chain = "שופרסל שלי"
+                    elif "yochananof" in store_name.lower() or "יוחננוף" in store_name:
+                        matched_chain = "יוחננוף"
+                    elif "victory" in store_name.lower() or "ויקטורי" in store_name:
+                        matched_chain = "ויקטורי"
+                        
+                    valid_stores.append({
+                        "name": store_name,
+                        "chain": matched_chain,
+                        "duration": round(duration_mins)
+                    })
+        return valid_stores
     except Exception as e:
-        print(f"Error calling Google Places API: {e}")
-        return ["שגיאה בסריקת החנויות סביבך."]
+        print(f"Maps API Error: {e}")
+        return []
 
 @app.route("/bot", methods=["POST"])
 def whatsapp_bot():
@@ -40,23 +68,49 @@ def whatsapp_bot():
     resp = MessagingResponse()
     msg = resp.message()
     
+    # אם המשתמש שלח מיקום
     if latitude and longitude:
-        print(f"📍 Received location: Lat {latitude}, Lng {longitude}")
-        
-        # שליפת חנויות אמיתיות מגוגל מפות על בסיס המיקום של המשתמש
-        nearby_stores = get_nearby_supermarkets(latitude, longitude)
-        
-        reply = "📍 המיקום שלך נקלט! הנה הסופרמרקטים הכי קרובים אליך בטווח נסיעה:\n\n"
-        for store in nearby_stores:
-            reply += f"{store}\n"
+        stores = get_nearby_stores(latitude, longitude)
+        if not stores:
+            reply = "📍 קיבלתי מיקום, אך לא מצאתי סופרמרקטים ברדיוס של 20 דקות נסיעה, או שמפתח המפות חסר."
+        else:
+            reply = "📍 *מצאתי את הסופרים הבאים בטווח של 20 דקות נסיעה:* \n\n"
+            for s in stores:
+                reply += f"🏪 *{s['name']}* ({s['duration']} דקות נסיעה באוטו)\n"
+            reply += "\n🛒 שלח לי עכשיו רשימת מוצרים (למשל: 'חלב ואורז') כדי שאחשב איפה הכי זול לך לקנות!"
             
-        reply += "\n🛒 שלח לי עכשיו את רשימת המוצרים שלך (למשל: 'חלב ואורז') כדי שנבדוק איפה הכי זול לקנות אותם מביניהם!"
         msg.body(reply)
         return str(resp)
 
-    # לוגיקת הודעת טקסט רגילה (אם המשתמש שלח מוצרים)
+    # אם המשתמש שלח טקסט (רשימת מוצרים)
     user_msg = request.values.get('Body', '').strip()
-    reply = f"קיבלתי את הרשימה: '{user_msg}'. כדי שאדע להגיד לך איזה סופר מהסופרים באזור שלך הכי זול, שלח לי קודם את המיקום שלך בלחיצה על ה-'+' בוואטסאפ."
+    
+    reply = "🛒 *תוצאות השוואת המחירים עבור הסל שלך:* \n\n"
+    found_any = False
+    
+    # חישוב עלויות כלליות לפי רשת
+    totals = {"שופרסל שלי": 0, "רמי לוי": 0, "יוחננוף": 0, "ויקטורי": 0}
+    
+    for item in MOCK_PRICES.keys():
+        if item in user_msg:
+            found_any = True
+            reply += f"🔹 *{item}:*\n"
+            for chain, price in MOCK_PRICES[item].items():
+                reply += f" - {chain}: ₪{price}\n"
+                totals[chain] += price
+            reply += "\n"
+            
+    if found_any:
+        reply += "📊 *סך הכל עבור כל הסל שלך:*\n"
+        cheapest_chain = min(totals, key=totals.get)
+        for chain, total in totals.items():
+            if chain == cheapest_chain:
+                reply += f"🏆 *{chain}: ₪{round(total, 2)} (הכי זול!)*\n"
+            else:
+                reply += f" ⁃ {chain}: ₪{round(total, 2)}\n"
+    else:
+        reply = "היי! כדי להתחיל, שלח לי קודם את המיקום שלך בוואטסאפ 📍 כדי שאמצא חנויות בטווח של 20 דקות."
+
     msg.body(reply)
     return str(resp)
 
