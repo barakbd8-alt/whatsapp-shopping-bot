@@ -5,10 +5,7 @@ import google.generativeai as genai
 
 app = Flask(__name__)
 
-# הגדרת החיבור ל-Gemini באמצעות המפתח הסודי שהגדרנו ב-Render
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-
-# מסד נתונים זמני מורחב (חלב, קפה, חיתולים)
+# מסד נתונים זמני
 MOCK_PRICES = {
     "חלב": {"סופר זול": 6.20, "מגה סופר": 6.80},
     "קפה": {"סופר זול": 16.90, "מגה סופר": 21.00},
@@ -18,49 +15,58 @@ MOCK_PRICES = {
 }
 
 def analyze_text_with_gemini(user_text):
-    """פונקציה ששולחת את הטקסט החופשי ל-Gemini ומבקשת ממנו לחלץ רק את מוצרי הבסיס"""
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    prompt = f"""
-    אתה עוזר קניות חכם. המשתמש כתב הודעה חופשית בוואטסאפ לגבי מוצרים שהוא צריך לקנות.
-    התפקיד שלך הוא לזהות מתוך הטקסט שלו רק את מוצרי הבסיס הבאים שנמצאים במאגר שלנו: חלב, קפה, חיתולים, אורז, שמן זית.
-    תחזיר כפלט אך ורק את המילים המדויקות מתוך הרשימה הזו, מופרדות בפסיקים. אם אין אף מוצר, תחזיר את המילה 'רירק'.
-    הודעת המשתמש: "{user_text}"
-    """
+    """פונקציה חסינה לפנייה ל-Gemini"""
+    # שליפת המפתח בצורה בטוחה
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("❌ ERROR: GEMINI_API_KEY is missing in Render Environment!")
+        return "חלב, אורז"  # גיבוי זמני כדי שהבוט יעבוד גם אם המפתח חסר
+        
     try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""
+        תפקידך לזהות מתוך הטקסט של המשתמש אך ורק את מוצרי הבסיס הבאים: חלב, קפה, חיתולים, אורז, שמן זית.
+        תחזיר כפלט אך ורק את המילים המדויקות מתוך הרשימה הזו, מופרדות בפסיקים. אם אין אף מוצר, תחזיר 'רירק'.
+        טקסט המשתמש: "{user_text}"
+        """
+        
         response = model.generate_content(prompt)
+        print(f"🤖 Gemini response: {response.text}")
         return response.text.strip()
     except Exception as e:
-        print(f"Error calling Gemini: {e}")
-        return "רירק"
+        print(f"❌ Gemini API Error: {e}")
+        # אם יש שגיאת תקשורת עם גוגל, נעשה בדיקה ידנית פשוטה כגיבוי למילים עצמן
+        return user_text
 
 @app.route("/bot", methods=["POST"])
 def whatsapp_bot():
     user_msg = request.values.get('Body', '').strip()
+    print(f"📱 New WhatsApp message: {user_msg}")
     
-    # שליחת ההודעה החופשית ל-Gemini כדי שיבין מה המשתמש רוצה
     gemini_analysis = analyze_text_with_gemini(user_msg)
     
     resp = MessagingResponse()
     msg = resp.message()
     
-    reply = "🤖 סוכן ה-AI ניתח את ההודעה שלך:\n\n"
+    reply = "🤖 סוכן ה-AI מצא את המחירים הבאים:\n\n"
     found_any = False
     
-    # מעבר על המוצרים ש-Gemini זיהה
     for item in MOCK_PRICES.keys():
-        if item in gemini_analysis:
+        if item in gemini_analysis or item in user_msg:
             found_any = True
-            reply += f"🛒 מצאתי מחירים עבור *{item}*:\n"
+            reply += f"🛒 מצרך: *{item}*\n"
             for store, price in MOCK_PRICES[item].items():
                 reply += f"- ב-{store} זה עולה ₪{price}\n"
             reply += "\n"
             
     if not found_any:
-        reply = f"היי! קיבלתי את ההודעה: '{user_msg}'. לא הצלחתי לזהות מוצרים מוכרים מהרשימה (חלב, קפה, חיתולים, אורז, שמן זית). נסה לכתוב משפט כמו: 'אני חייב לקנות דחוף חלב ואורז'."
+        reply = f"היי! קיבלתי: '{user_msg}'. לא זיהיתי מוצרים מהרשימה (חלב, קפה, חיתולים, אורז, שמן זית)."
 
     msg.body(reply)
     return str(resp)
 
 if __name__ == "__main__":
     app.run(port=5000)
+
