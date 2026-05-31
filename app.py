@@ -14,47 +14,31 @@ MOCK_PRICES = {
     "שמן זית": {"סופר זול": 29.90, "מגה סופר": 34.90}
 }
 
-def analyze_text_with_gemini(user_text):
-    """פונקציה חסינה לפנייה ל-Gemini"""
-    # שליפת המפתח בצורה בטוחה
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ ERROR: GEMINI_API_KEY is missing in Render Environment!")
-        return "חלב, אורז"  # גיבוי זמני כדי שהבוט יעבוד גם אם המפתח חסר
-        
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        prompt = f"""
-        תפקידך לזהות מתוך הטקסט של המשתמש אך ורק את מוצרי הבסיס הבאים: חלב, קפה, חיתולים, אורז, שמן זית.
-        תחזיר כפלט אך ורק את המילים המדויקות מתוך הרשימה הזו, מופרדות בפסיקים. אם אין אף מוצר, תחזיר 'רירק'.
-        טקסט המשתמש: "{user_text}"
-        """
-        
-        response = model.generate_content(prompt)
-        print(f"🤖 Gemini response: {response.text}")
-        return response.text.strip()
-    except Exception as e:
-        print(f"❌ Gemini API Error: {e}")
-        # אם יש שגיאת תקשורת עם גוגל, נעשה בדיקה ידנית פשוטה כגיבוי למילים עצמן
-        return user_text
-
 @app.route("/bot", methods=["POST"])
 def whatsapp_bot():
-    user_msg = request.values.get('Body', '').strip()
-    print(f"📱 New WhatsApp message: {user_msg}")
-    
-    gemini_analysis = analyze_text_with_gemini(user_msg)
+    # בדיקה האם המשתמש שלח מיקום (וואטסאפ שולח קווי רוחב ואורך)
+    latitude = request.values.get('Latitude')
+    longitude = request.values.get('Longitude')
     
     resp = MessagingResponse()
     msg = resp.message()
+    
+    if latitude and longitude:
+        # המשתמש שלח מיקום!
+        print(f"📍 Received location: Lat {latitude}, Lng {longitude}")
+        reply = f"📍 המיקום שלך התקבל בהצלחה!\nקו רוחב: {latitude}\nקו אורך: {longitude}\n\nבשלב הבא אני אסרוק את הסופרים ברדיוס של 20 דקות מהנקודה הזו!"
+        msg.body(reply)
+        return str(resp)
+
+    # אם זה טקסט רגיל ולא מיקום, נריץ את הלוגיקה הרגילה של הבוט
+    user_msg = request.values.get('Body', '').strip()
+    print(f"📱 New WhatsApp message: {user_msg}")
     
     reply = "🤖 סוכן ה-AI מצא את המחירים הבאים:\n\n"
     found_any = False
     
     for item in MOCK_PRICES.keys():
-        if item in gemini_analysis or item in user_msg:
+        if item in user_msg:
             found_any = True
             reply += f"🛒 מצרך: *{item}*\n"
             for store, price in MOCK_PRICES[item].items():
@@ -62,11 +46,10 @@ def whatsapp_bot():
             reply += "\n"
             
     if not found_any:
-        reply = f"היי! קיבלתי: '{user_msg}'. לא זיהיתי מוצרים מהרשימה (חלב, קפה, חיתולים, אורז, שמן זית)."
+        reply = f"היי! כדי שאדע אילו סופרים קרובים אליך ברדיוס של 20 דקות, אנא שלח לי את המיקום הנוכחי שלך בוואטסאפ (באמצעות כפתור ה'+' -> מיקום)."
 
     msg.body(reply)
     return str(resp)
 
 if __name__ == "__main__":
     app.run(port=5000)
-
